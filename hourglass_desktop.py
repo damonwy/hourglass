@@ -20,7 +20,7 @@ grav = 9.8
 ColRestitution = 0.8
 
 quality = 1 # Use a larger value for higher-res simulations
-n_particles, n_grid = 2000 * quality ** 2, 150 * quality
+n_particles, n_grid = 3000 * quality ** 2, 100 * quality
 R = ivec2(n_grid, n_grid)
 
 dx, inv_dx = 1 / n_grid, float(n_grid)
@@ -44,6 +44,7 @@ background_img = ti.Vector.field(4, ti.f32, shape=resolution)
 grid_v = ti.Vector.field(2, float, (n_grid, n_grid))
 grid_m = ti.field(float, (n_grid, n_grid))
 grid_c = ti.Vector.ndarray(4, dtype=float, shape=resolution)
+grid_c_field = ti.Vector.field(4, dtype=float, shape=resolution)
 
 # loads image assets
 def load_assets():
@@ -63,6 +64,11 @@ def load_assets():
 
     hourglass_img.from_numpy(hourglass_img_np)
     background_img.from_numpy(background_img_np)
+
+@ti.kernel
+def copy_to_field(arr: ti.types.ndarray()):
+    for I in ti.grouped(arr):
+        grid_c_field[I] = arr[I]
 
 @ti.kernel
 def reset():
@@ -115,7 +121,7 @@ def grid_operator():
     for i, j in grid_m:
         if grid_m[i, j] > 0:  # No need for epsilon here
             grid_v[i, j] = (1 / grid_m[i, j]) * grid_v[i, j]  # Momentum to velocity
-            grid_v[i, j] += dt * gravity[None]*40  # gravity
+            grid_v[i, j] += dt * gravity[None]* 10  # gravity
             # if i < 3 and grid_v[i, j][0] < 0:
             #     grid_v[i, j][0] = 0  # Boundary conditions
             # if i > n_grid - 3 and grid_v[i, j][0] > 0: 
@@ -129,8 +135,8 @@ def grid_operator():
             d = border(P)
             n = normal(P)
             if (d > 0.):
-                grid_v[i, j] -= n * d *ColRestitution
-                grid_v[i, j] *= 0.8
+                grid_v[i, j] -= n * d * ColRestitution
+                grid_v[i, j] *= 0.9
 
 @ti.func
 def border(p):
@@ -213,13 +219,13 @@ def G2P():
         x[p] += dt * v[p] 
 
 @ti.kernel
-def add_front(current_img: ti.types.ndarray()):
-    for i, j in current_img:
+def add_front(grid_c: ti.types.ndarray()):
+    for i, j in grid_c:
         if (background_img[i, j][2] < 0.1):
-            current_img[i, j][0] = background_img[i, j][0]
-            current_img[i, j][1] = background_img[i, j][1]
-            current_img[i, j][2] = background_img[i, j][2]
-            current_img[i, j][3] = background_img[i, j][3]
+            grid_c[i, j][0] = background_img[i, j][0]
+            grid_c[i, j][1] = background_img[i, j][1]
+            grid_c[i, j][2] = background_img[i, j][2]
+            grid_c[i, j][3] = background_img[i, j][3]
 
 @ti.kernel
 def init():
@@ -241,19 +247,18 @@ def smoothFilter(d):
     return smoothstep(v, -v, d)
 
 @ti.kernel
-def smooth(grid_c:ti.types.ndarray()):
+def smooth(grid_c: ti.types.ndarray()):
     for i, j in grid_c:
         fragCoord = vec2(i, j)
         p = fragCoord
         col = vec3(0.0)
         col = mix(col, vec3(0.0), smoothFilter(border(p)))
         sminAcc = 0.0            
-        a = 1.0
-
+        a = 0.5
         for k in range(n_particles):
             pp = x[k]*resolution
-            sminAcc += 2**(-a*sdCircle(p - pp, 5.0))
-        col = mix(col, vec3(0.0, 0.0, 1.0), smoothFilter(-log2(sminAcc)/0.8))
+            sminAcc += 2**(-a*sdCircle(p - pp,8.0))
+        col = mix(col, vec3(0.0, 0.0, 1.0), smoothFilter(-log2(sminAcc)/2.0))
         grid_c[i,j] = vec4(col, 1.0)
         if (grid_c[i, j][2] < 0.8):
             grid_c[i, j] = 0.5*hourglass_img[i, j]+vec4(0.0, 0.0, 0.0,0.5)
@@ -261,29 +266,31 @@ def smooth(grid_c:ti.types.ndarray()):
 def main():
     init()
     gui = ti.GUI('Hourglass', res=resolution, background_color=0x112F41)
-
-    while gui.running:
-        if gui.get_event(ti.GUI.PRESS):
-            if gui.event.key == 'r': reset()
-            elif gui.event.key in [ti.GUI.ESCAPE, ti.GUI.EXIT]: break
-        if gui.event is not None: gravity[None] = [0, 0]  # if had any event
-        if gui.is_pressed(ti.GUI.LEFT, 'a'): gravity[None][0] = -grav
-        if gui.is_pressed(ti.GUI.RIGHT, 'd'): gravity[None][0] = grav
-        if gui.is_pressed(ti.GUI.UP, 'w'): gravity[None][1] = grav
-        if gui.is_pressed(ti.GUI.DOWN, 's'): gravity[None][1] = -grav
+    window = ti.ui.Window('Hourglass', resolution)
+    canvas = window.get_canvas()
+    while window.running:
+        # if canvas.get_event(ti.GUI.PRESS):
+        #     if gui.event.key == 'r': reset()
+        #     elif gui.event.key in [ti.GUI.ESCAPE, ti.GUI.EXIT]: break
+        # if gui.event is not None: gravity[None] = [0, 0]  # if had any event
+        # if gui.is_pressed(ti.GUI.LEFT, 'a'): gravity[None][0] = -grav
+        # if gui.is_pressed(ti.GUI.RIGHT, 'd'): gravity[None][0] = grav
+        # if gui.is_pressed(ti.GUI.UP, 'w'): gravity[None][1] = grav
+        # if gui.is_pressed(ti.GUI.DOWN, 's'): gravity[None][1] = -grav
 
         for s in range(int(2e-3 // dt)):
             reset()
             P2G()
             grid_operator()
             G2P()
-                   
+
         smooth(grid_c)
-        # gui.circles(x.to_numpy(),radius=3.5,color=0x068587)        
+        # canvas.circles(x, color=(1.0, 0.5, 0.5), radius=0.01)        
 
         add_front(grid_c)
-        gui.set_image(grid_c.to_numpy())
-        gui.show()  # Change to gui.show(f'{frame:06d}.png') to write images to disk
+        copy_to_field(grid_c)
+        canvas.set_image(grid_c_field)
+        window.show()  # Change to gui.show(f'{frame:06d}.png') to write images to disk
 
 def aot():
     m = ti.aot.Module(ti.vulkan)
@@ -298,7 +305,7 @@ def aot():
                     })
     m.add_kernel(add_front,
                 template_args={
-                    'current_img': grid_c                
+                    'grid_c': grid_c                
                     })
     m.save('.', 'hourglass')
 
@@ -308,4 +315,4 @@ if __name__ == '__main__':
     # for arg in sys.argv:
     #     print(arg)
     main()
-    # aot()
+    aot()

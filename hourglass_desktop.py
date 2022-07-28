@@ -20,9 +20,9 @@ grav = 9.8
 ColRestitution = 0.8
 
 quality = 1 # Use a larger value for higher-res simulations
-n_particles, n_grid = 3000 * quality ** 2, 100 * quality
+n_particles, n_grid = 2000 * quality ** 2, 100 * quality
 R = ivec2(n_grid, n_grid)
-
+dx_c, inv_dx_c = 1/resolution[0], float(resolution[0])
 dx, inv_dx = 1 / n_grid, float(n_grid)
 dt = 5e-5/ quality
 p_vol = (dx * 0.5) ** 2
@@ -45,7 +45,7 @@ grid_v = ti.Vector.field(2, float, (n_grid, n_grid))
 grid_m = ti.field(float, (n_grid, n_grid))
 grid_c = ti.Vector.ndarray(4, dtype=float, shape=resolution)
 grid_c_field = ti.Vector.field(4, dtype=float, shape=resolution)
-
+grid_a = ti.field(dtype=float, shape=resolution)
 # loads image assets
 def load_assets():
     hourglass_image = Image.open(os.path.join(DIRECTORY_PATH, HOURGLASS_IMAGE_FILE))
@@ -75,6 +75,7 @@ def reset():
     for i, j in grid_m:
         grid_v[i, j] = [0, 0]
         grid_m[i, j] = 0
+        grid_a[i, j] = 0
 
 @ti.kernel
 def P2G():
@@ -84,8 +85,8 @@ def P2G():
         # Quadratic kernels  [http://mpm.graphics   Eqn. 123, with x=fx, fx-1,fx-2]
         w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1) ** 2, 0.5 * (fx - 0.5) ** 2]
         F[p] = (ti.Matrix.identity(float, 2) + dt * C[p]) @ F[p] # deformation gradient update
-        # h = max(0.1, min(5, ti.exp(10 * (1.0 - Jp[p]))))
-        h = 1.0
+        h = max(0.1, min(5, ti.exp(10 * (1.0 - Jp[p]))))
+        # h = 1.0
         la = lambda_0 * h
         mu = 0.0
         U, sig, V = ti.svd(F[p])
@@ -108,10 +109,27 @@ def P2G():
             weight = w[i][0] * w[j][1]
             grid_v[base + offset] += weight * (m[p] * v[p] + affine @ dpos)
             grid_m[base + offset] += weight * m[p]
+        
+
+        # base_c = (x[p] * vec2(inv_dx_c, 1.0/resolution[1]) - 0.5).cast(int)
+        # fx_c = x[p] * vec2(inv_dx_c, 1.0/resolution[1]) - base_c.cast(float)
+        # # Quadratic kernels  [http://mpm.graphics   Eqn. 123, with x=fx, fx-1,fx-2]
+        # w_c = [0.5 * (1.5 - fx_c) ** 2, 0.75 - (fx_c - 1) ** 2, 0.5 * (fx_c - 0.5) ** 2]
+        # pp = x[p]*resolution
+        # a = 0.8
+        # for i, j in ti.static(ti.ndrange(3, 3)):  # Loop over 3x3 grid node neighborhood
+        #     offset_c = ti.Vector([i, j])
+        #     temp = base_c + offset_c
+        #     weight_c = w_c[i][0] * w_c[j][1]
+        #     grid_a[temp] += weight_c*2**(-a*sdCircle(temp - pp, 8.0))
+            # dpos_c = (offset_c.cast(float) - fx_c) * dx_c
+            # grid_v[base + offset] += weight_c * (m[p] * v[p] + affine @ dpos_c)
+            # grid_m[base + offset] += weight_c * m[p]
+
 
 @ti.func
 def normal(p):
-    eps = 0.01
+    eps = 0.001
     h = vec2(eps,0)
     return normalize( vec2(border(p + h.xy) - border(p - h.xy),
                            border(p + h.yx) - border(p - h.yx)))
@@ -121,7 +139,7 @@ def grid_operator():
     for i, j in grid_m:
         if grid_m[i, j] > 0:  # No need for epsilon here
             grid_v[i, j] = (1 / grid_m[i, j]) * grid_v[i, j]  # Momentum to velocity
-            grid_v[i, j] += dt * gravity[None]* 10  # gravity
+            grid_v[i, j] += dt * gravity[None]* 20  # gravity
             # if i < 3 and grid_v[i, j][0] < 0:
             #     grid_v[i, j][0] = 0  # Boundary conditions
             # if i > n_grid - 3 and grid_v[i, j][0] > 0: 
@@ -161,7 +179,7 @@ def border(p):
     center2.x = center2.x - R.x*0.5 
     center2.y = center2.y - R.y*0.5
     
-    boundary2 = sdBox(center2,  vec2(R.x*0.06/2.0, R.y*0.18/2.0))
+    boundary2 = sdBox(center2,  vec2(R.x*0.025/2.0, R.y*0.18/2.0))
     boundary = merge(merge(boundary0, boundary2), boundary1)
     return boundary
 
@@ -252,16 +270,18 @@ def smooth(grid_c: ti.types.ndarray()):
         fragCoord = vec2(i, j)
         p = fragCoord
         col = vec3(0.0)
-        col = mix(col, vec3(0.0), smoothFilter(border(p)))
+        # col = mix(col, vec3(0.0), smoothFilter(border(p)))
         sminAcc = 0.0            
-        a = 0.5
-        for k in range(n_particles):
-            pp = x[k]*resolution
-            sminAcc += 2**(-a*sdCircle(p - pp,8.0))
-        col = mix(col, vec3(0.0, 0.0, 1.0), smoothFilter(-log2(sminAcc)/2.0))
+        a = 0.3
+        # for k in range(n_particles):
+        #     pp = x[k]*resolution
+        #     sminAcc += 2**(-a*sdCircle(p - pp, 8.5))
+        sminAcc=grid_a[i, j]
+        col = mix(col, vec3(0.0, 0.0, 1.0), smoothFilter(-log2(sminAcc)/1.9))
         grid_c[i,j] = vec4(col, 1.0)
         if (grid_c[i, j][2] < 0.8):
             grid_c[i, j] = 0.5*hourglass_img[i, j]+vec4(0.0, 0.0, 0.0,0.5)
+            grid_c[i, j][3] = 1.0
 
 def main():
     init()
@@ -269,14 +289,14 @@ def main():
     window = ti.ui.Window('Hourglass', resolution)
     canvas = window.get_canvas()
     while window.running:
-        # if canvas.get_event(ti.GUI.PRESS):
-        #     if gui.event.key == 'r': reset()
-        #     elif gui.event.key in [ti.GUI.ESCAPE, ti.GUI.EXIT]: break
-        # if gui.event is not None: gravity[None] = [0, 0]  # if had any event
-        # if gui.is_pressed(ti.GUI.LEFT, 'a'): gravity[None][0] = -grav
-        # if gui.is_pressed(ti.GUI.RIGHT, 'd'): gravity[None][0] = grav
-        # if gui.is_pressed(ti.GUI.UP, 'w'): gravity[None][1] = grav
-        # if gui.is_pressed(ti.GUI.DOWN, 's'): gravity[None][1] = -grav
+        # if window.get_event(ti.GUI.PRESS):
+        #     if window.event.key == 'r': reset()
+        #     elif window.event.key in [ti.GUI.ESCAPE, ti.GUI.EXIT]: break
+        # if window.event is not None: gravity[None] = [0, 0]  # if had any event
+        # if window.is_pressed(ti.GUI.LEFT, 'a'): gravity[None][0] = -grav
+        # if window.is_pressed(ti.GUI.RIGHT, 'd'): gravity[None][0] = grav
+        # if window.is_pressed(ti.GUI.UP, 'w'): gravity[None][1] = grav
+        # if window.is_pressed(ti.GUI.DOWN, 's'): gravity[None][1] = -grav
 
         for s in range(int(2e-3 // dt)):
             reset()
@@ -315,4 +335,4 @@ if __name__ == '__main__':
     # for arg in sys.argv:
     #     print(arg)
     main()
-    aot()
+    # aot()

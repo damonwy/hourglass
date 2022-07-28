@@ -5,7 +5,7 @@ from taichi.math import *
 import os
 from PIL import Image, ImageFilter
 
-ti.init(arch=ti.vulkan)
+ti.init(arch=ti.vulkan, debug=True, log_level=ti.TRACE)
 
 DIRECTORY_PATH = os.path.dirname(__file__)
 HOURGLASS_IMAGE_FILE = "hg.png"
@@ -43,9 +43,16 @@ background_img = ti.Vector.field(4, ti.f32, shape=resolution)
 
 grid_v = ti.Vector.field(2, float, (n_grid, n_grid))
 grid_m = ti.field(float, (n_grid, n_grid))
+grid_v_int = ti.Vector.field(2, dtype=int, shape=(n_grid, n_grid))
+grid_m_int = ti.field(dtype=int, shape=(n_grid, n_grid))
 grid_c = ti.Vector.ndarray(4, dtype=float, shape=resolution)
 grid_c_field = ti.Vector.field(4, dtype=float, shape=resolution)
+
+v_exp = 40
+m_exp = 40
+
 grid_a = ti.field(dtype=float, shape=resolution)
+
 # loads image assets
 def load_assets():
     hourglass_image = Image.open(os.path.join(DIRECTORY_PATH, HOURGLASS_IMAGE_FILE))
@@ -75,7 +82,10 @@ def reset():
     for i, j in grid_m:
         grid_v[i, j] = [0, 0]
         grid_m[i, j] = 0
+        grid_v_int[i, j] = [0, 0]
+        grid_m_int[i, j] = 0
         grid_a[i, j] = 0
+
 
 @ti.kernel
 def P2G():
@@ -107,9 +117,11 @@ def P2G():
             offset = ti.Vector([i, j])
             dpos = (offset.cast(float) - fx) * dx
             weight = w[i][0] * w[j][1]
-            grid_v[base + offset] += weight * (m[p] * v[p] + affine @ dpos)
-            grid_m[base + offset] += weight * m[p]
-        
+            # grid_v[base + offset] += weight * (m[p] * v[p] + affine @ dpos)
+            grid_v_int[base + offset] += int(ti.floor(0.5 + weight * (m[p] * v[p] + affine @ dpos) * (2.0 ** v_exp)))
+            # grid_m[base + offset] += weight * m[p]
+            grid_m_int[base + offset] += int(ti.floor(0.5 + weight * m[p] * (2.0 ** m_exp)))
+
 
         # base_c = (x[p] * vec2(inv_dx_c, 1.0/resolution[1]) - 0.5).cast(int)
         # fx_c = x[p] * vec2(inv_dx_c, 1.0/resolution[1]) - base_c.cast(float)
@@ -137,16 +149,19 @@ def normal(p):
 @ti.kernel
 def grid_operator():
     for i, j in grid_m:
-        if grid_m[i, j] > 0:  # No need for epsilon here
-            grid_v[i, j] = (1 / grid_m[i, j]) * grid_v[i, j]  # Momentum to velocity
-            grid_v[i, j] += dt * gravity[None]* 20  # gravity
+        if grid_m_int[i, j] > 0:  # No need for epsilon here
+            # grid_v[i, j] = (1 / grid_m[i, j]) * grid_v[i, j]  # Momentum to velocity
+            grid_v[i, j] = (2 ** (m_exp - v_exp) / grid_m_int[i, j]) * grid_v_int[i, j]
+            grid_v[i, j] += dt * gravity[None] * 20  # gravity
+            grid_m[i, j] = grid_m_int[i, j] / ( 2.0 ** m_exp)
+
             # if i < 3 and grid_v[i, j][0] < 0:
             #     grid_v[i, j][0] = 0  # Boundary conditions
-            # if i > n_grid - 3 and grid_v[i, j][0] > 0: 
+            # if i > n_grid - 3 and grid_v[i, j][0] > 0:
             #     grid_v[i, j][0] = 0
-            # if j < 3 and grid_v[i, j][1] < 0: 
+            # if j < 3 and grid_v[i, j][1] < 0:
             #     grid_v[i, j][1] = 0
-            # if j > n_grid - 3 and grid_v[i, j][1] > 0: 
+            # if j > n_grid - 3 and grid_v[i, j][1] > 0:
             #     grid_v[i, j][1] = 0
             v = grid_v[i, j]
             P = vec2(i, j)
@@ -163,20 +178,20 @@ def border(p):
     h0 = 1.0731/height*R.y*0.5
 
     center0 = p
-    center0.x = center0.x - R.x*0.5 
+    center0.x = center0.x - R.x*0.5
     center0.y = center0.y - R.y*0.20/2.0
 
     boundary0 = sdCutDisk(center0,  R.x*0.75/2.0, R.y*0.1/2.0)
 
-    center1 = p 
-    center1.x = center1.x - R.x*0.5     
+    center1 = p
+    center1.x = center1.x - R.x*0.5
 
-    center1.y = center1.y - R.y*1.81/2    
+    center1.y = center1.y - R.y*1.81/2
     center1 = rotate(center1, 3.14)
 
     boundary1 = sdCutDisk(center1,  R.x*0.75/2.0, R.y*0.1/2.0)
-    center2 = p 
-    center2.x = center2.x - R.x*0.5 
+    center2 = p
+    center2.x = center2.x - R.x*0.5
     center2.y = center2.y - R.y*0.5
     
     boundary2 = sdBox(center2,  vec2(R.x*0.025/2.0, R.y*0.18/2.0))
@@ -189,13 +204,13 @@ def rotate(v, a):
     c = ti.cos(a)
     m = mat2([[c, s],[-s, c]])
     return m @ v
-   
-@ti.func 
+
+@ti.func
 def sdBox(p, b):
     d = abs(p) - b
     return (max(d, 0.0).norm() + min(max(d.x, d.y), 0.0))
 
-@ti.func 
+@ti.func
 def sdCutDisk(p, r, h):
     w = ti.sqrt(r*r-h*h)
     p.x = abs(p.x)
@@ -208,13 +223,13 @@ def sdCutDisk(p, r, h):
             res = h - p.y
         else:
             res = (p - vec2(w, h)).norm()
-    return res 
+    return res
 
 @ti.func
 def merge(d1, d2):
     return min(d1, d2)
 
-@ti.func 
+@ti.func
 def intersection(d1, d2):
     return max(d1, d2)
 
@@ -234,7 +249,7 @@ def G2P():
             new_C += 4 * inv_dx * weight * g_v.outer_product(dpos)
 
         v[p], C[p] = new_v, new_C
-        x[p] += dt * v[p] 
+        x[p] += dt * v[p]
 
 @ti.kernel
 def add_front(grid_c: ti.types.ndarray()):
@@ -270,6 +285,7 @@ def smooth(grid_c: ti.types.ndarray()):
         fragCoord = vec2(i, j)
         p = fragCoord
         col = vec3(0.0)
+
         # col = mix(col, vec3(0.0), smoothFilter(border(p)))
         sminAcc = 0.0            
         a = 0.3
@@ -278,6 +294,7 @@ def smooth(grid_c: ti.types.ndarray()):
         #     sminAcc += 2**(-a*sdCircle(p - pp, 8.5))
         sminAcc=grid_a[i, j]
         col = mix(col, vec3(0.0, 0.0, 1.0), smoothFilter(-log2(sminAcc)/1.9))
+
         grid_c[i,j] = vec4(col, 1.0)
         if (grid_c[i, j][2] < 0.8):
             grid_c[i, j] = 0.5*hourglass_img[i, j]+vec4(0.0, 0.0, 0.0,0.5)
@@ -305,7 +322,7 @@ def main():
             G2P()
 
         smooth(grid_c)
-        # canvas.circles(x, color=(1.0, 0.5, 0.5), radius=0.01)        
+        # canvas.circles(x, color=(1.0, 0.5, 0.5), radius=0.01)
 
         add_front(grid_c)
         copy_to_field(grid_c)
@@ -321,11 +338,11 @@ def aot():
     m.add_kernel(G2P)
     m.add_kernel(smooth,
                 template_args={
-                    'grid_c': grid_c                
+                    'grid_c': grid_c
                     })
     m.add_kernel(add_front,
                 template_args={
-                    'grid_c': grid_c                
+                    'grid_c': grid_c
                     })
     m.save('.', 'hourglass')
 
